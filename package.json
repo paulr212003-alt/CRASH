@@ -2,8 +2,9 @@
   "name": "visitor-portal",
   "version": "1.0.0",
   "description": "",
-  "main": "Backend/server.js",
+  "main": "index.js",
   "scripts": {
+    "build": "node scripts/sync-public.js",
     "start": "node Backend/server.js",
     "dev": "nodemon Backend/server.js",
     "test": "echo \"No tests configured\""
