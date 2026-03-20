@@ -9,7 +9,7 @@ const { connectToDatabase } = require("./db");
 
 const app = express();
 const NODE_ENV = process.env.NODE_ENV || "development";
-const CORS_ORIGINS = String(process.env.CORS_ORIGINS || "")
+const CORS_ORIGINS = String(process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || "")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);

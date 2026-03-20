@@ -21,6 +21,9 @@ Set these in Render or Vercel:
 `ADMIN_PASSWORD=<strong password>`
 `CORS_ORIGINS=https://<your-production-domain>`
 
+Backward-compatible fallback also works:
+`CORS_ORIGIN=https://<your-production-domain>`
+
 If you leave `CORS_ORIGINS` empty, the server allows all origins. That is okay for quick testing, but not ideal for production.
 
 ## MongoDB Atlas checklist
