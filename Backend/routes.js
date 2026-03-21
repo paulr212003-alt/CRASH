@@ -30,6 +30,11 @@ const RICO_UNITS = [
 const ALLOWED_ANALYTIC_RANGES = new Set([7, 14, 30, 180, 365]);
 const VIP_DEFAULT_DEPARTMENT = "IT";
 const VIP_DEFAULT_UNIT = "Gurugram";
+const ANALYTICS_UTC_OFFSET_MINUTES = Number.parseInt(
+  String(process.env.ANALYTICS_UTC_OFFSET_MINUTES || "330"),
+  10
+);
+const ANALYTICS_OFFSET_MS = (Number.isFinite(ANALYTICS_UTC_OFFSET_MINUTES) ? ANALYTICS_UTC_OFFSET_MINUTES : 330) * 60 * 1000;
 
 const normalizePhone = (phone = "") => String(phone).replace(/\D/g, "");
 const normalizeName = (name = "") => String(name).trim().replace(/\s+/g, " ");
@@ -64,6 +69,57 @@ function hourLabel(hour) {
   const suffix = hour >= 12 ? "PM" : "AM";
   const hour12 = hour % 12 === 0 ? 12 : hour % 12;
   return `${String(hour12).padStart(2, "0")}:00 ${suffix}`;
+}
+
+function toAnalyticsLocalDate(dateValue) {
+  return new Date(new Date(dateValue).getTime() + ANALYTICS_OFFSET_MS);
+}
+
+function fromAnalyticsLocalDate(dateValue) {
+  return new Date(new Date(dateValue).getTime() - ANALYTICS_OFFSET_MS);
+}
+
+function analyticsLocalDateKey(dateValue) {
+  const date = toAnalyticsLocalDate(dateValue);
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function analyticsHumanDayLabel(dateValue) {
+  return toAnalyticsLocalDate(dateValue).toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    timeZone: "UTC",
+  });
+}
+
+function analyticsHourOfArrival(dateValue) {
+  return toAnalyticsLocalDate(dateValue).getUTCHours();
+}
+
+function analyticsRangeWindow(rangeDays) {
+  const analyticsNow = toAnalyticsLocalDate(new Date());
+  const endLocal = new Date(
+    Date.UTC(
+      analyticsNow.getUTCFullYear(),
+      analyticsNow.getUTCMonth(),
+      analyticsNow.getUTCDate(),
+      23,
+      59,
+      59,
+      999
+    )
+  );
+  const startLocal = new Date(endLocal);
+  startLocal.setUTCDate(startLocal.getUTCDate() - (rangeDays - 1));
+  startLocal.setUTCHours(0, 0, 0, 0);
+
+  return {
+    start: fromAnalyticsLocalDate(startLocal),
+    end: fromAnalyticsLocalDate(endLocal),
+  };
 }
 
 function normalizeCompanyType(value) {
@@ -731,15 +787,10 @@ router.get("/analytics", async (req, res) => {
     const requestedRange = Number.parseInt(String(req.query?.rangeDays || "7"), 10);
     const rangeDays = ALLOWED_ANALYTIC_RANGES.has(requestedRange) ? requestedRange : 7;
 
-    const end = new Date();
-    end.setHours(23, 59, 59, 999);
-
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    start.setDate(start.getDate() - (rangeDays - 1));
+    const { start, end } = analyticsRangeWindow(rangeDays);
 
     const visitors = await Visitor.find({
-      date: { $gte: start, $lte: end },
+      $or: [{ timeIn: { $gte: start, $lte: end } }, { date: { $gte: start, $lte: end } }],
     })
       .select("date timeIn department status")
       .lean();
@@ -749,10 +800,9 @@ router.get("/analytics", async (req, res) => {
     const trendCounts = [];
 
     for (let i = 0; i < rangeDays; i += 1) {
-      const date = new Date(start);
-      date.setDate(start.getDate() + i);
-      const key = localDateKey(date);
-      labels.push(humanDayLabel(date));
+      const date = new Date(start.getTime() + i * 24 * 60 * 60 * 1000);
+      const key = analyticsLocalDateKey(date);
+      labels.push(analyticsHumanDayLabel(date));
       trendKeyToCount.set(key, 0);
     }
 
@@ -765,16 +815,14 @@ router.get("/analytics", async (req, res) => {
         activePasses += 1;
       }
 
-      const dateForTrend = visitor.date || visitor.timeIn;
-      if (dateForTrend) {
-        const key = localDateKey(dateForTrend);
+      const arrivalTime = visitor.timeIn || visitor.date;
+      if (arrivalTime) {
+        const key = analyticsLocalDateKey(arrivalTime);
         if (trendKeyToCount.has(key)) {
           trendKeyToCount.set(key, (trendKeyToCount.get(key) || 0) + 1);
         }
-      }
 
-      if (visitor.timeIn) {
-        const hour = new Date(visitor.timeIn).getHours();
+        const hour = analyticsHourOfArrival(arrivalTime);
         if (Number.isInteger(hour) && hour >= 0 && hour <= 23) {
           hourCounts[hour] += 1;
         }

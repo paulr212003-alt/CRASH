@@ -5,6 +5,10 @@
     {
       "source": "/health",
       "destination": "/api/health"
+    },
+    {
+      "source": "/vip-entry",
+      "destination": "/vip-entry.html"
     }
   ]
 }

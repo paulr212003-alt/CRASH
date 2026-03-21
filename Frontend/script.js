@@ -27,6 +27,7 @@ let passHistoryAdminPassword = "";
 
 let analyticsRange = 7;
 let trendChart = null;
+let peakHoursChart = null;
 let departmentChart = null;
 let lastAnalyticsData = null;
 let historyFilterState = { mode: "all", rangeDays: null, fromDate: "", toDate: "" };
@@ -1932,7 +1933,7 @@ function chartGridColor() {
 }
 
 function removeKpiLoadingPulse() {
-  ["kpiVisitorsToday", "kpiActivePasses", "kpiRangeVisitors"].forEach((id) => {
+  ["kpiVisitorsToday", "kpiActivePasses", "kpiPeakHour", "kpiRangeVisitors"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.classList.remove("loading-pulse");
   });
@@ -1941,10 +1942,16 @@ function removeKpiLoadingPulse() {
 function updateKpis(todayCount, analyticsData) {
   const kpiVisitorsToday = document.getElementById("kpiVisitorsToday");
   const kpiActivePasses = document.getElementById("kpiActivePasses");
+  const kpiPeakHour = document.getElementById("kpiPeakHour");
   const kpiRangeVisitors = document.getElementById("kpiRangeVisitors");
 
   if (kpiVisitorsToday) kpiVisitorsToday.textContent = String(todayCount || 0);
   if (kpiActivePasses) kpiActivePasses.textContent = String(analyticsData?.activePasses || 0);
+
+   const peak = analyticsData?.peakHour || {};
+  if (kpiPeakHour) {
+    kpiPeakHour.textContent = peak.count > 0 ? `${peak.label} (${peak.count})` : "-";
+  }
 
   if (kpiRangeVisitors) {
     kpiRangeVisitors.textContent = String(analyticsData?.totalVisitors || 0);
@@ -1957,20 +1964,32 @@ function buildOrUpdateAnalyticsCharts(analyticsData) {
   if (!window.Chart) return;
 
   const trendCanvas = document.getElementById("trendChart");
+  const peakCanvas = document.getElementById("peakHoursChart");
   const deptCanvas = document.getElementById("departmentChart");
 
-  if (!trendCanvas || !deptCanvas) return;
+  if (!trendCanvas || !peakCanvas || !deptCanvas) return;
 
   const axisColor = chartAxisColor();
   const gridColor = chartGridColor();
 
   const trendCtx = trendCanvas.getContext("2d");
+  const peakCtx = peakCanvas.getContext("2d");
   const deptCtx = deptCanvas.getContext("2d");
 
   const trendLabels = analyticsData?.trend?.labels || [];
   const trendCounts = analyticsData?.trend?.counts || [];
+  const peakLabels = analyticsData?.peakHours?.labels || [];
+  const peakCounts = analyticsData?.peakHours?.counts || [];
   const deptLabels = analyticsData?.departments?.labels || [];
   const deptCounts = analyticsData?.departments?.counts || [];
+  const peakHourIndex = Number.isInteger(analyticsData?.peakHour?.hour) ? analyticsData.peakHour.hour : -1;
+
+  const peakBarFillColors = peakLabels.map((_, index) =>
+    index === peakHourIndex ? "rgba(255, 191, 71, 0.9)" : "rgba(47, 210, 255, 0.35)"
+  );
+  const peakBarStrokeColors = peakLabels.map((_, index) =>
+    index === peakHourIndex ? "#ffd166" : "#38c7ff"
+  );
 
   if (!trendChart) {
     const trendGradient = trendCtx.createLinearGradient(0, 0, 0, 260);
@@ -2013,6 +2032,44 @@ function buildOrUpdateAnalyticsCharts(analyticsData) {
     trendChart.options.scales.y.ticks.color = axisColor;
     trendChart.options.plugins.legend.labels.color = axisColor;
     trendChart.update();
+  }
+
+  if (!peakHoursChart) {
+    peakHoursChart = new Chart(peakCtx, {
+      type: "bar",
+      data: {
+        labels: peakLabels,
+        datasets: [
+          {
+            label: "Arrivals",
+            data: peakCounts,
+            backgroundColor: peakBarFillColors,
+            borderColor: peakBarStrokeColors,
+            borderWidth: 1.5,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { ticks: { color: axisColor }, grid: { color: gridColor } },
+          y: { ticks: { color: axisColor }, grid: { color: gridColor }, beginAtZero: true },
+        },
+        plugins: {
+          legend: { labels: { color: axisColor } },
+        },
+      },
+    });
+  } else {
+    peakHoursChart.data.labels = peakLabels;
+    peakHoursChart.data.datasets[0].data = peakCounts;
+    peakHoursChart.data.datasets[0].backgroundColor = peakBarFillColors;
+    peakHoursChart.data.datasets[0].borderColor = peakBarStrokeColors;
+    peakHoursChart.options.scales.x.ticks.color = axisColor;
+    peakHoursChart.options.scales.y.ticks.color = axisColor;
+    peakHoursChart.options.plugins.legend.labels.color = axisColor;
+    peakHoursChart.update();
   }
 
   if (!departmentChart) {
