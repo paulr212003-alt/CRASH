@@ -24,6 +24,15 @@ Set these in Render or Vercel:
 Backward-compatible fallback also works:
 `CORS_ORIGIN=https://<your-production-domain>`
 
+For email approval workflow:
+`APPROVAL_EMAIL_TO=paul.r212003@gmail.com`
+`SMTP_HOST=smtp.gmail.com`
+`SMTP_PORT=465`
+`SMTP_SECURE=true`
+`SMTP_USER=<smtp username>`
+`SMTP_PASS=<smtp password or app password>`
+`SMTP_FROM=RICO Visitor Portal <your-email@example.com>`
+
 If you leave `CORS_ORIGINS` empty, the server allows all origins. That is okay for quick testing, but not ideal for production.
 
 ## MongoDB Atlas checklist

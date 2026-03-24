@@ -1,4 +1,6 @@
 const express = require("express");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const QRCode = require("qrcode");
 const Visitor = require("./visitorModel");
 const VipPass = require("./vipPassModel");
@@ -30,6 +32,7 @@ const RICO_UNITS = [
 const ALLOWED_ANALYTIC_RANGES = new Set([7, 14, 30, 180, 365]);
 const VIP_DEFAULT_DEPARTMENT = "IT";
 const VIP_DEFAULT_UNIT = "Gurugram";
+const DEFAULT_APPROVAL_EMAIL = "paul.r212003@gmail.com";
 const ANALYTICS_UTC_OFFSET_MINUTES = Number.parseInt(
   String(process.env.ANALYTICS_UTC_OFFSET_MINUTES || "330"),
   10
@@ -38,6 +41,7 @@ const ANALYTICS_OFFSET_MS = (Number.isFinite(ANALYTICS_UTC_OFFSET_MINUTES) ? ANA
 
 const normalizePhone = (phone = "") => String(phone).replace(/\D/g, "");
 const normalizeName = (name = "") => String(name).trim().replace(/\s+/g, " ");
+let approvalTransporter = null;
 
 function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -170,6 +174,291 @@ async function createQrDataUrl(payload) {
     margin: 1,
     width: 260,
   });
+}
+
+function createHttpError(status, message, extra = {}) {
+  const error = new Error(message);
+  error.status = status;
+  Object.assign(error, extra);
+  return error;
+}
+
+function getApprovalRecipient() {
+  return String(process.env.APPROVAL_EMAIL_TO || DEFAULT_APPROVAL_EMAIL).trim();
+}
+
+function isApprovalEmailConfigured() {
+  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && getApprovalRecipient());
+}
+
+function getApprovalTransporter() {
+  if (!isApprovalEmailConfigured()) return null;
+
+  if (!approvalTransporter) {
+    const secureSetting = String(process.env.SMTP_SECURE || "true").trim().toLowerCase();
+    const secure = !["false", "0", "no"].includes(secureSetting);
+    const port = Number.parseInt(String(process.env.SMTP_PORT || (secure ? "465" : "587")), 10);
+
+    approvalTransporter = nodemailer.createTransport({
+      host: String(process.env.SMTP_HOST || "").trim(),
+      port: Number.isFinite(port) ? port : secure ? 465 : 587,
+      secure,
+      auth: {
+        user: String(process.env.SMTP_USER || "").trim(),
+        pass: String(process.env.SMTP_PASS || "").trim(),
+      },
+    });
+  }
+
+  return approvalTransporter;
+}
+
+function getBaseUrl(req) {
+  const configured = String(process.env.APP_BASE_URL || "").trim().replace(/\/+$/, "");
+  if (configured) return configured;
+
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const forwardedHost = String(req.headers["x-forwarded-host"] || req.headers.host || "")
+    .split(",")[0]
+    .trim();
+
+  if (!forwardedHost) return "";
+  return `${forwardedProto || (req.secure ? "https" : "http")}://${forwardedHost}`;
+}
+
+function approvalBadgeColor(decision = "pending") {
+  if (decision === "approved") return "#2fd0a6";
+  if (decision === "denied") return "#ff6b7a";
+  return "#ffd166";
+}
+
+function renderApprovalDecisionPage({ title, message, visitor, decision = "pending" }) {
+  const color = approvalBadgeColor(decision);
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${title}</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background: #071321;
+        color: #f5fbff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        padding: 20px;
+      }
+      .card {
+        width: min(560px, 100%);
+        background: rgba(9, 25, 42, 0.96);
+        border: 1px solid rgba(127, 212, 255, 0.2);
+        border-radius: 18px;
+        padding: 28px;
+        box-shadow: 0 20px 44px rgba(0, 0, 0, 0.35);
+      }
+      .badge {
+        display: inline-block;
+        margin-bottom: 16px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: ${color};
+        color: #081018;
+        font-weight: 700;
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 1.6rem;
+      }
+      p {
+        color: #c8dced;
+        line-height: 1.6;
+      }
+      ul {
+        margin: 20px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+      li {
+        padding: 10px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      strong {
+        color: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <article class="card">
+      <span class="badge">${decision.toUpperCase()}</span>
+      <h1>${title}</h1>
+      <p>${message}</p>
+      <ul>
+        <li><strong>Pass ID:</strong> ${visitor?.passId || "-"}</li>
+        <li><strong>Visitor:</strong> ${visitor?.name || "-"}</li>
+        <li><strong>Phone:</strong> ${visitor?.phone || "-"}</li>
+        <li><strong>Purpose:</strong> ${visitor?.visitType || "-"}</li>
+        <li><strong>Person To Meet:</strong> ${visitor?.personToMeet || "-"}</li>
+      </ul>
+    </article>
+  </body>
+</html>`;
+}
+
+function buildApprovalEmailHtml({ visitor, allowUrl, denyUrl }) {
+  return `<!DOCTYPE html>
+<html lang="en">
+  <body style="margin:0;padding:24px;background:#f4f8fc;font-family:Arial,sans-serif;color:#102235;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #dbe7f1;">
+            <tr>
+              <td style="padding:24px 28px;background:#08192d;color:#ffffff;">
+                <p style="margin:0 0 8px;font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:#84d3ff;">RICO Visitor Approval</p>
+                <h1 style="margin:0;font-size:24px;">Approval Required For Visitor Entry</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:28px;">
+                <p style="margin-top:0;">A new visitor approval request has been submitted. Review the details below and click the action button.</p>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:20px 0;border-collapse:collapse;">
+                  <tr><td style="padding:10px 0;border-bottom:1px solid #e8eef5;"><strong>Pass ID</strong></td><td style="padding:10px 0;border-bottom:1px solid #e8eef5;">${visitor.passId}</td></tr>
+                  <tr><td style="padding:10px 0;border-bottom:1px solid #e8eef5;"><strong>Name</strong></td><td style="padding:10px 0;border-bottom:1px solid #e8eef5;">${visitor.name}</td></tr>
+                  <tr><td style="padding:10px 0;border-bottom:1px solid #e8eef5;"><strong>Phone</strong></td><td style="padding:10px 0;border-bottom:1px solid #e8eef5;">${visitor.phone}</td></tr>
+                  <tr><td style="padding:10px 0;border-bottom:1px solid #e8eef5;"><strong>Visitor Type</strong></td><td style="padding:10px 0;border-bottom:1px solid #e8eef5;">${visitor.visitorType || "-"}</td></tr>
+                  <tr><td style="padding:10px 0;border-bottom:1px solid #e8eef5;"><strong>Company</strong></td><td style="padding:10px 0;border-bottom:1px solid #e8eef5;">${visitor.company || "-"}</td></tr>
+                  <tr><td style="padding:10px 0;border-bottom:1px solid #e8eef5;"><strong>Purpose</strong></td><td style="padding:10px 0;border-bottom:1px solid #e8eef5;">${visitor.visitType || "-"}</td></tr>
+                  <tr><td style="padding:10px 0;border-bottom:1px solid #e8eef5;"><strong>Person To Meet</strong></td><td style="padding:10px 0;border-bottom:1px solid #e8eef5;">${visitor.personToMeet || "-"}</td></tr>
+                  <tr><td style="padding:10px 0;border-bottom:1px solid #e8eef5;"><strong>Department</strong></td><td style="padding:10px 0;border-bottom:1px solid #e8eef5;">${visitor.department || "-"}</td></tr>
+                  <tr><td style="padding:10px 0;"><strong>Requested At</strong></td><td style="padding:10px 0;">${new Date(visitor.approvalRequestedAt || visitor.createdAt || new Date()).toLocaleString("en-IN")}</td></tr>
+                </table>
+                <div style="margin-top:26px;">
+                  <a href="${allowUrl}" style="display:inline-block;padding:13px 22px;border-radius:999px;background:#18c98a;color:#081018;text-decoration:none;font-weight:700;margin-right:12px;">Allow</a>
+                  <a href="${denyUrl}" style="display:inline-block;padding:13px 22px;border-radius:999px;background:#ff6b7a;color:#ffffff;text-decoration:none;font-weight:700;">Deny</a>
+                </div>
+                <p style="margin:22px 0 0;color:#5a7085;font-size:13px;">If the buttons do not work, open these links manually:</p>
+                <p style="margin:8px 0 0;font-size:12px;word-break:break-all;color:#5a7085;">Allow: ${allowUrl}</p>
+                <p style="margin:6px 0 0;font-size:12px;word-break:break-all;color:#5a7085;">Deny: ${denyUrl}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+function buildApprovalEmailText({ visitor, allowUrl, denyUrl }) {
+  return [
+    "RICO Visitor Approval Request",
+    `Pass ID: ${visitor.passId}`,
+    `Name: ${visitor.name}`,
+    `Phone: ${visitor.phone}`,
+    `Visitor Type: ${visitor.visitorType || "-"}`,
+    `Company: ${visitor.company || "-"}`,
+    `Purpose: ${visitor.visitType || "-"}`,
+    `Person To Meet: ${visitor.personToMeet || "-"}`,
+    `Department: ${visitor.department || "-"}`,
+    "",
+    `Allow: ${allowUrl}`,
+    `Deny: ${denyUrl}`,
+  ].join("\n");
+}
+
+function buildVisitorPayload(rawBody = {}) {
+  const {
+    name,
+    phone,
+    visitorType,
+    companyType,
+    company,
+    companyName,
+    otherCompanyName,
+    ricoUnit,
+    visitType,
+    personToMeet,
+    department,
+    idProofType,
+    idProofNumber,
+    carriesLaptop,
+    laptopSerialNumber,
+    remarks,
+  } = rawBody || {};
+
+  const normalizedCompanyTypeRaw = normalizeCompanyType(companyType);
+  const normalizedCompanyType = ["RICO", "Other"].includes(normalizedCompanyTypeRaw) ? normalizedCompanyTypeRaw : "";
+  const normalizedOtherCompany = String(
+    otherCompanyName || companyName || (normalizedCompanyType !== "RICO" ? company : "") || ""
+  ).trim();
+  const normalizedCarriesLaptop = parseCarriesLaptop(carriesLaptop);
+  const hasLaptop = normalizedCarriesLaptop === null ? false : normalizedCarriesLaptop;
+  const normalizedDepartment = normalizeDepartment(department);
+
+  const payload = {
+    name: normalizeName(name),
+    phone: normalizePhone(phone),
+    visitorType: normalizeVisitorType(visitorType),
+    companyType: normalizedCompanyType,
+    company: normalizedCompanyType === "RICO" ? "RICO" : normalizedOtherCompany,
+    ricoUnit: normalizeRicoUnit(ricoUnit),
+    visitType: String(visitType || "").trim(),
+    personToMeet: String(personToMeet || "").trim(),
+    department: normalizedDepartment,
+    idProofType: String(idProofType || "").trim(),
+    idProofNumber: String(idProofNumber || "").trim(),
+    carriesLaptop: hasLaptop,
+    laptopSerialNumber: String(laptopSerialNumber || "").trim(),
+    remarks: String(remarks || "").trim(),
+    isVip: false,
+    vipAccessId: "",
+  };
+
+  const requiredFields = ["name", "phone", "personToMeet", "visitType"];
+  const missing = requiredFields.filter((field) => !payload[field]);
+  if (missing.length) {
+    throw createHttpError(400, `Missing required fields: ${missing.join(", ")}`);
+  }
+
+  if (payload.companyType === "RICO" && payload.ricoUnit && !RICO_UNITS.includes(payload.ricoUnit)) {
+    throw createHttpError(400, "Select a valid RICO unit.");
+  }
+
+  if (payload.companyType !== "RICO") {
+    payload.ricoUnit = "";
+  }
+
+  if (payload.department && !DEPARTMENT_OPTIONS.includes(payload.department)) {
+    throw createHttpError(400, "Select a valid department.");
+  }
+
+  if (!payload.carriesLaptop) {
+    payload.laptopSerialNumber = "";
+  }
+
+  return payload;
+}
+
+async function ensureNewPassAllowed(payload) {
+  const exactNameFilter = {
+    name: { $regex: `^${escapeRegex(payload.name)}$`, $options: "i" },
+  };
+
+  const exactNamePhoneMatch = await Visitor.findOne({
+    ...exactNameFilter,
+    phone: payload.phone,
+  }).sort({ createdAt: -1 });
+
+  if (exactNamePhoneMatch) {
+    throw createHttpError(409, "Same name and phone already exists. Kindly renew pass for this individual.", {
+      code: "RENEW_REQUIRED",
+      visitor: exactNamePhoneMatch,
+    });
+  }
 }
 
 function parseDateStart(dateText) {
@@ -360,98 +649,14 @@ router.post("/checkVisitor", async (req, res) => {
 
 router.post("/createPass", async (req, res) => {
   try {
-    const {
-      name,
-      phone,
-      visitorType,
-      companyType,
-      company,
-      companyName,
-      otherCompanyName,
-      ricoUnit,
-      visitType,
-      personToMeet,
-      department,
-      idProofType,
-      idProofNumber,
-      carriesLaptop,
-      laptopSerialNumber,
-      remarks,
-      adminPassword,
-    } = req.body || {};
+    const { adminPassword } = req.body || {};
 
     if (String(adminPassword || "") !== ADMIN_PASSWORD) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const normalizedCompanyTypeRaw = normalizeCompanyType(companyType);
-    const normalizedCompanyType = ["RICO", "Other"].includes(normalizedCompanyTypeRaw) ? normalizedCompanyTypeRaw : "";
-    const normalizedOtherCompany = String(
-      otherCompanyName || companyName || (normalizedCompanyType !== "RICO" ? company : "") || ""
-    ).trim();
-    const normalizedCarriesLaptop = parseCarriesLaptop(carriesLaptop);
-    const hasLaptop = normalizedCarriesLaptop === null ? false : normalizedCarriesLaptop;
-    const normalizedDepartment = normalizeDepartment(department);
-
-    const payload = {
-      name: normalizeName(name),
-      phone: normalizePhone(phone),
-      visitorType: normalizeVisitorType(visitorType),
-      companyType: normalizedCompanyType,
-      company: normalizedCompanyType === "RICO" ? "RICO" : normalizedOtherCompany,
-      ricoUnit: normalizeRicoUnit(ricoUnit),
-      visitType: String(visitType || "").trim(),
-      personToMeet: String(personToMeet || "").trim(),
-      department: normalizedDepartment,
-      idProofType: String(idProofType || "").trim(),
-      idProofNumber: String(idProofNumber || "").trim(),
-      carriesLaptop: hasLaptop,
-      laptopSerialNumber: String(laptopSerialNumber || "").trim(),
-      remarks: String(remarks || "").trim(),
-      isVip: false,
-      vipAccessId: "",
-    };
-
-    const requiredFields = ["name", "phone", "personToMeet", "visitType"];
-    const missing = requiredFields.filter((field) => !payload[field]);
-
-    if (missing.length) {
-      return res.status(400).json({ message: `Missing required fields: ${missing.join(", ")}` });
-    }
-
-    if (payload.companyType === "RICO" && payload.ricoUnit && !RICO_UNITS.includes(payload.ricoUnit)) {
-      return res.status(400).json({ message: "Select a valid RICO unit." });
-    }
-
-    if (payload.companyType !== "RICO") {
-      payload.ricoUnit = "";
-    }
-
-    if (payload.department && !DEPARTMENT_OPTIONS.includes(payload.department)) {
-      return res.status(400).json({ message: "Select a valid department." });
-    }
-
-    if (!payload.carriesLaptop) {
-      payload.laptopSerialNumber = "";
-    }
-
-    const exactNameFilter = {
-      name: { $regex: `^${escapeRegex(payload.name)}$`, $options: "i" },
-    };
-
-    const exactNamePhoneMatch = await Visitor.findOne({
-      ...exactNameFilter,
-      phone: payload.phone,
-    }).sort({ createdAt: -1 });
-
-    if (exactNamePhoneMatch) {
-      return res.status(409).json({
-        success: false,
-        code: "RENEW_REQUIRED",
-        message: "Same name and phone already exists. Kindly renew pass for this individual.",
-        visitor: exactNamePhoneMatch,
-      });
-    }
+    const payload = buildVisitorPayload(req.body || {});
+    await ensureNewPassAllowed(payload);
 
     const now = new Date();
     const passId = await generateVisitorPassId("PASS");
@@ -462,6 +667,12 @@ router.post("/createPass", async (req, res) => {
       qrPayload,
       passId,
       status: "active",
+      approvalStatus: "approved",
+      approvalRecipient: "",
+      approvalToken: "",
+      approvalRequestedAt: null,
+      approvalDecisionAt: now,
+      approvalEmailSentAt: null,
       date: now,
       timeIn: now,
       timeOut: null,
@@ -482,7 +693,184 @@ router.post("/createPass", async (req, res) => {
       visitor,
     });
   } catch (error) {
+    if (error.status === 409) {
+      return res.status(409).json({
+        success: false,
+        code: error.code || "RENEW_REQUIRED",
+        message: error.message,
+        visitor: error.visitor || null,
+      });
+    }
+    if (error.status === 400) {
+      return res.status(400).json({ message: error.message });
+    }
     return res.status(500).json({ message: "Failed to create gate pass.", error: error.message });
+  }
+});
+
+router.post("/requestApproval", async (req, res) => {
+  try {
+    if (!isApprovalEmailConfigured()) {
+      return res.status(503).json({
+        success: false,
+        message: "Approval email is not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS, and approval email settings first.",
+      });
+    }
+
+    const payload = buildVisitorPayload(req.body || {});
+    await ensureNewPassAllowed(payload);
+
+    const now = new Date();
+    const passId = await generateVisitorPassId("PASS");
+    const qrPayload = buildPassQrPayload(passId, payload.phone);
+    const approvalToken = crypto.randomBytes(24).toString("hex");
+    const approvalRecipient = getApprovalRecipient();
+
+    const visitor = await Visitor.create({
+      ...payload,
+      qrPayload,
+      passId,
+      status: "pending",
+      approvalStatus: "pending",
+      approvalToken,
+      approvalRecipient,
+      approvalRequestedAt: now,
+      approvalDecisionAt: null,
+      approvalEmailSentAt: null,
+      date: now,
+      timeIn: now,
+      timeOut: null,
+    });
+
+    try {
+      const baseUrl = getBaseUrl(req);
+      const allowUrl = `${baseUrl}/api/approval/respond?token=${encodeURIComponent(approvalToken)}&decision=allow`;
+      const denyUrl = `${baseUrl}/api/approval/respond?token=${encodeURIComponent(approvalToken)}&decision=deny`;
+      const transporter = getApprovalTransporter();
+
+      await transporter.sendMail({
+        from: String(process.env.SMTP_FROM || process.env.SMTP_USER || "").trim(),
+        to: approvalRecipient,
+        subject: `Visitor approval required: ${visitor.name} (${visitor.passId})`,
+        text: buildApprovalEmailText({ visitor, allowUrl, denyUrl }),
+        html: buildApprovalEmailHtml({ visitor, allowUrl, denyUrl }),
+      });
+
+      visitor.approvalEmailSentAt = new Date();
+      await visitor.save();
+    } catch (error) {
+      await Visitor.deleteOne({ _id: visitor._id });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to send approval email.",
+        error: error.message,
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: `Approval email sent to ${approvalRecipient}. Waiting for decision.`,
+      passId: visitor.passId,
+      visitor,
+    });
+  } catch (error) {
+    if (error.status === 409) {
+      return res.status(409).json({
+        success: false,
+        code: error.code || "RENEW_REQUIRED",
+        message: error.message,
+        visitor: error.visitor || null,
+      });
+    }
+    if (error.status === 400) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
+    return res.status(500).json({ success: false, message: "Failed to create approval request.", error: error.message });
+  }
+});
+
+router.get("/approval/respond", async (req, res) => {
+  try {
+    const token = String(req.query?.token || "").trim();
+    const decision = String(req.query?.decision || "").trim().toLowerCase();
+
+    if (!token || !["allow", "deny"].includes(decision)) {
+      return res
+        .status(400)
+        .type("html")
+        .send(
+          renderApprovalDecisionPage({
+            title: "Approval Link Invalid",
+            message: "This approval link is invalid or incomplete.",
+            visitor: null,
+            decision: "denied",
+          })
+        );
+    }
+
+    const visitor = await Visitor.findOne({ approvalToken: token }).sort({ createdAt: -1 });
+    if (!visitor) {
+      return res
+        .status(404)
+        .type("html")
+        .send(
+          renderApprovalDecisionPage({
+            title: "Approval Request Not Found",
+            message: "This approval request could not be found. It may have been removed or already processed.",
+            visitor: null,
+            decision: "denied",
+          })
+        );
+    }
+
+    const now = new Date();
+    const currentApprovalStatus = String(visitor.approvalStatus || "approved").toLowerCase();
+
+    if (decision === "allow") {
+      visitor.approvalStatus = "approved";
+      visitor.approvalDecisionAt = now;
+      if (["pending", "denied"].includes(String(visitor.status || "").toLowerCase())) {
+        visitor.status = "active";
+      }
+    } else {
+      visitor.approvalStatus = "denied";
+      visitor.approvalDecisionAt = now;
+      if (String(visitor.status || "").toLowerCase() !== "completed") {
+        visitor.status = "denied";
+      }
+    }
+
+    await visitor.save();
+
+    const repeatedAction =
+      (decision === "allow" && currentApprovalStatus === "approved") ||
+      (decision === "deny" && currentApprovalStatus === "denied");
+
+    return res
+      .status(200)
+      .type("html")
+      .send(
+        renderApprovalDecisionPage({
+          title: decision === "allow" ? "Visitor Approved" : "Visitor Denied",
+          message: repeatedAction
+            ? `This visitor was already marked as ${decision === "allow" ? "approved" : "denied"}.`
+            : `The visitor request is now ${decision === "allow" ? "approved" : "denied"}. Refresh the portal to see the latest status.`,
+          visitor,
+          decision: decision === "allow" ? "approved" : "denied",
+        })
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .type("html")
+      .send(
+        renderApprovalDecisionPage({
+          title: "Approval Processing Failed",
+          message: error.message || "Something went wrong while updating approval status.",
+          visitor: null,
+          decision: "denied",
+        })
+      );
   }
 });
 
@@ -501,6 +889,15 @@ router.post("/validatePass", async (req, res) => {
     const visitor = await Visitor.findOne(query).sort({ createdAt: -1 });
     if (!visitor) {
       return res.status(404).json({ valid: false, message: "Pass not found." });
+    }
+
+    const approvalStatus = String(visitor.approvalStatus || "approved").toLowerCase();
+    if (approvalStatus === "pending") {
+      return res.status(403).json({ valid: false, message: "Approval is still pending for this pass." });
+    }
+
+    if (approvalStatus === "denied") {
+      return res.status(403).json({ valid: false, message: "This pass request was denied." });
     }
 
     if (visitor.status !== "active") {
@@ -539,6 +936,20 @@ router.post("/markExit", async (req, res) => {
         success: true,
         message: "Exit already marked.",
         visitor,
+      });
+    }
+
+    if (String(visitor.approvalStatus || "approved").toLowerCase() === "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Approval is still pending. Exit cannot be marked yet.",
+      });
+    }
+
+    if (String(visitor.approvalStatus || "approved").toLowerCase() === "denied") {
+      return res.status(400).json({
+        success: false,
+        message: "This pass was denied and cannot be checked out.",
       });
     }
 

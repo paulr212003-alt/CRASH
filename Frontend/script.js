@@ -65,6 +65,23 @@ function formatDate(value) {
   return new Date(value).toLocaleDateString();
 }
 
+function normalizeApprovalStatus(value = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["pending", "approved", "denied"].includes(normalized)) return normalized;
+  return "approved";
+}
+
+function approvalStatusLabel(value = "") {
+  const status = normalizeApprovalStatus(value);
+  if (status === "pending") return "Pending";
+  if (status === "denied") return "Denied";
+  return "Approved";
+}
+
+function approvalStatusClass(value = "") {
+  return `approval-status-tag approval-status-${normalizeApprovalStatus(value)}`;
+}
+
 function toDateInputValue(date) {
   const d = new Date(date);
   const year = d.getFullYear();
@@ -534,6 +551,7 @@ function initCheckVisitorPage() {
       Department: visitor?.department || "-",
       "Purpose of Visit": visitor?.visitType,
       Status: visitor?.status,
+      Approval: approvalStatusLabel(visitor?.approvalStatus),
       "Time In": formatDateTime(visitor?.timeIn),
       "Time Out": formatDateTime(visitor?.timeOut),
     });
@@ -822,14 +840,55 @@ function showPassPreview(data) {
   previewCard.style.animation = "";
 }
 
+function handleApprovalRequestSuccess(data) {
+  const createPassForm = document.getElementById("createPassForm");
+  const issueDuplicateHint = document.getElementById("issueDuplicateHint");
+  const approvalRequestResult = document.getElementById("approvalRequestResult");
+  const approvalRequestedBanner = document.getElementById("approvalRequestedBanner");
+  const approvalRequestedPassId = document.getElementById("approvalRequestedPassId");
+  const passIssuedBanner = document.getElementById("passIssuedBanner");
+  const passPreviewWrap = document.getElementById("passPreviewWrap");
+
+  if (approvalRequestedPassId) approvalRequestedPassId.textContent = `${data.passId || "-"} • Pending`;
+  if (approvalRequestedBanner) approvalRequestedBanner.classList.remove("hidden");
+  if (passIssuedBanner) passIssuedBanner.classList.add("hidden");
+  if (passPreviewWrap) passPreviewWrap.classList.add("hidden");
+
+  if (approvalRequestResult) {
+    setResult(
+      approvalRequestResult,
+      data.message || "Approval email sent. Refresh Today's Visitors after the mail decision.",
+      "success"
+    );
+  }
+
+  showToast("Approval email sent");
+
+  if (createPassForm) {
+    createPassForm.reset();
+    syncCompanyFields();
+    syncLaptopFields();
+  }
+
+  if (issueDuplicateHint) {
+    setResult(
+      issueDuplicateHint,
+      "Enter name and phone to issue a new pass. Use Renew Pass for existing same person."
+    );
+  }
+}
+
 function handleIssueSuccess(data) {
   const passIssuedBanner = document.getElementById("passIssuedBanner");
   const issuedPassId = document.getElementById("issuedPassId");
   const createPassForm = document.getElementById("createPassForm");
   const issueDuplicateHint = document.getElementById("issueDuplicateHint");
+  const approvalRequestResult = document.getElementById("approvalRequestResult");
+  const approvalRequestedBanner = document.getElementById("approvalRequestedBanner");
 
   if (issuedPassId) issuedPassId.textContent = data.passId || "-";
   if (passIssuedBanner) passIssuedBanner.classList.remove("hidden");
+  if (approvalRequestedBanner) approvalRequestedBanner.classList.add("hidden");
   showToast("Gate pass issued");
   announceGatePassIssued();
   showPassPreview(data);
@@ -846,6 +905,13 @@ function handleIssueSuccess(data) {
       "Enter name and phone to issue a new pass. Use Renew Pass for existing same person."
     );
   }
+
+  if (approvalRequestResult) {
+    setResult(
+      approvalRequestResult,
+      "Use Send Approval to email an allow or deny action to the approver before activating the pass."
+    );
+  }
 }
 
 function initIssuePassPage() {
@@ -855,6 +921,8 @@ function initIssuePassPage() {
   const nameInput = document.getElementById("name");
   const phoneInput = document.getElementById("phone");
   const issueDuplicateHint = document.getElementById("issueDuplicateHint");
+  const sendApprovalBtn = document.getElementById("sendApprovalBtn");
+  const approvalRequestResult = document.getElementById("approvalRequestResult");
   let duplicateNameTimer = null;
 
   if (!createPassForm) return;
@@ -948,6 +1016,37 @@ function initIssuePassPage() {
       payload,
     });
   });
+
+  if (sendApprovalBtn) {
+    sendApprovalBtn.addEventListener("click", async () => {
+      const payload = getIssuePayload();
+
+      try {
+        const data = await apiRequest("/requestApproval", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        handleApprovalRequestSuccess(data);
+      } catch (error) {
+        if (error.status === 409) {
+          if (issueDuplicateHint) {
+            setResult(
+              issueDuplicateHint,
+              "Same name and phone already exists. Kindly use Renew Pass for this individual.",
+              "error"
+            );
+          }
+          showToast(error.message || "Renew pass required", true);
+          return;
+        }
+
+        if (approvalRequestResult) {
+          setResult(approvalRequestResult, error.message, "error");
+        }
+        showToast(error.message, true);
+      }
+    });
+  }
 }
 
 function initValidatePassPage() {
@@ -981,6 +1080,7 @@ function initValidatePassPage() {
       Department: visitor?.department || "-",
       Company: visitor?.company || "-",
       Status: visitor?.status,
+      Approval: approvalStatusLabel(visitor?.approvalStatus),
       "Time In": formatDateTime(visitor?.timeIn),
       "Time Out": formatDateTime(visitor?.timeOut),
     });
@@ -1175,7 +1275,7 @@ function renderTodayVisitors(visitors) {
 
   if (!Array.isArray(visitors) || visitors.length === 0) {
     todayVisitorsBody.innerHTML =
-      '<tr><td colspan="7" class="empty-row">No entries yet.</td></tr>';
+      '<tr><td colspan="8" class="empty-row">No entries yet.</td></tr>';
     return;
   }
 
@@ -1183,10 +1283,18 @@ function renderTodayVisitors(visitors) {
     const row = document.createElement("tr");
     const passId = visitor.passId || "";
     const phone = visitor.phone || "";
-    const isActive = String(visitor.status || "").toLowerCase() === "active";
+    const approvalStatus = normalizeApprovalStatus(visitor.approvalStatus);
+    const visitorStatus = String(visitor.status || "").toLowerCase();
+    const isActive = visitorStatus === "active" && approvalStatus === "approved";
     const exitAction = isActive
       ? `<button type="button" class="table-exit-btn" data-pass-id="${passId}" data-phone="${phone}">Mark Exit</button>`
-      : '<span class="table-status-tag">Exited</span>';
+      : `<span class="table-status-tag ${approvalStatusClass(approvalStatus)}">${
+          approvalStatus === "pending"
+            ? "Awaiting approval"
+            : visitorStatus === "completed"
+              ? "Exited"
+              : approvalStatusLabel(approvalStatus)
+        }</span>`;
 
     row.innerHTML = `
       <td>${passId || "-"}</td>
@@ -1194,6 +1302,9 @@ function renderTodayVisitors(visitors) {
       <td>${visitor.phone || "-"}</td>
       <td>${visitor.department || "-"}</td>
       <td>${formatTime(visitor.timeIn)}</td>
+      <td><span class="table-status-tag ${approvalStatusClass(approvalStatus)}">${approvalStatusLabel(
+        approvalStatus
+      )}</span></td>
       <td>${visitor.status || "-"}</td>
       <td>
         <div class="table-actions">

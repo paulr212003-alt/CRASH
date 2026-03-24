@@ -937,6 +937,17 @@ body[data-page="home"] .menu-card:hover .menu-icon {
   border-color: var(--input-border);
 }
 
+.form-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.form-action-row .btn-primary,
+.form-action-row .btn-secondary {
+  flex: 1 1 220px;
+}
+
 .result-text {
   margin: 11px 0 0;
   color: var(--text-muted);
@@ -1071,6 +1082,24 @@ tbody tr:nth-child(even) {
   background: rgba(53, 184, 142, 0.15);
   font-size: 0.72rem;
   padding: 4px 9px;
+}
+
+.approval-status-tag.approval-status-approved {
+  border-color: rgba(47, 208, 166, 0.36);
+  color: #96ffe0;
+  background: rgba(47, 208, 166, 0.14);
+}
+
+.approval-status-tag.approval-status-pending {
+  border-color: rgba(255, 209, 102, 0.36);
+  color: #ffe39d;
+  background: rgba(255, 209, 102, 0.14);
+}
+
+.approval-status-tag.approval-status-denied {
+  border-color: rgba(255, 107, 122, 0.36);
+  color: #ffc0c8;
+  background: rgba(255, 107, 122, 0.14);
 }
 
 .table-actions {

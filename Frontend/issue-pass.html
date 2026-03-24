@@ -173,8 +173,20 @@
             <textarea id="remarks" rows="2" placeholder="Optional remarks"></textarea>
           </label>
 
-          <button class="btn-primary span-2" type="submit">Issue Gate Pass</button>
+          <div class="form-action-row span-2">
+            <button class="btn-primary" type="submit">Issue Gate Pass</button>
+            <button class="btn-secondary" id="sendApprovalBtn" type="button">Send Approval</button>
+          </div>
         </form>
+
+        <p id="approvalRequestResult" class="result-text span-2">
+          Use Send Approval to email an allow or deny action to the approver before activating the pass.
+        </p>
+
+        <div id="approvalRequestedBanner" class="pass-banner hidden">
+          <span>Approval Request Sent</span>
+          <strong id="approvalRequestedPassId"></strong>
+        </div>
 
         <div id="passIssuedBanner" class="pass-banner hidden">
           <span>Issued Pass ID</span>
